@@ -1,5 +1,5 @@
 {
-  "name": "Patient Advocate AI",
+  "name": "Patient Advocate AI 2",
   "description": "Your personal medical advocate powered by Gemini AI. Translate medical jargon, prepare for appointments, summarize notes, and explain lab results.",
   "requestFramePermissions": [
     "camera",

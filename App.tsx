@@ -20,6 +20,9 @@ declare global {
     aistudio?: AIStudio;
     // Fix: Declare webkitAudioContext to resolve TypeScript error, maintaining cross-browser compatibility as per guidelines.
     webkitAudioContext?: typeof AudioContext; 
+    ai?: { // Minimal declaration for proofread to work with Chrome AI
+      proofread: (options: { text: string }) => Promise<{ text: string }>;
+    };
   }
 }
 
@@ -299,857 +302,621 @@ const App: React.FC = () => {
       latestInputTranscriptionRef.current = ''; // Clear ref too
     }
     if (latestOutputTranscriptionRef.current) {
-      setTranscriptionHistory(prev => [...prev, { speaker: 'AI', text: latestOutputTranscriptionRef.current.trim() }]);
+      setTranscriptionHistory(prev => [...prev, { speaker: 'Model', text: latestOutputTranscriptionRef.current.trim() }]);
       setCurrentLiveOutputTranscription('');
       latestOutputTranscriptionRef.current = ''; // Clear ref too
     }
+  }, []); // No dependencies needed for a full stop/reset.
 
-  }, [latestInputTranscriptionRef, latestOutputTranscriptionRef, setTranscriptionHistory, setCurrentLiveInputTranscription, setCurrentLiveOutputTranscription, setIsRecording, setLiveLoading]); // Added setters to dependencies as they are called directly within this callback.
-
-  const checkApiKeyStatus = useCallback(async () => {
-    setApiConfigured(false);
-    setShowSelectKeyButton(false);
-    setApiKeyStatusMessage('');
-
-    if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
-      try {
-        const hasSelected = await window.aistudio.hasSelectedApiKey();
-        if (hasSelected) {
-          setApiConfigured(true);
-          setApiKeyStatusMessage('✅ Gemini AI Ready - All features enabled');
-        } else {
-          setApiConfigured(false);
-          setApiKeyStatusMessage(
-            `🔑 Gemini API Key not configured. Please select your API key to get started.`
-          );
-          setShowSelectKeyButton(true);
-        }
-      } catch (e: any) {
-        console.error("Error checking aistudio API key status:", e);
-        if (process.env.API_KEY && process.env.API_KEY.startsWith('AIza')) {
-          setApiConfigured(true);
-          setApiKeyStatusMessage('✅ Gemini AI Ready - All features enabled (aistudio check failed)');
-        } else {
-          setApiConfigured(false);
-          setApiKeyStatusMessage(
-            `Gemini API key is not configured. Please set the API_KEY environment variable. 
-            For local development, you might need to configure it in your build tool (e.g., VITE_API_KEY for Vite apps).`
-          );
-        }
-      }
-    } else {
-      if (process.env.API_KEY && process.env.API_KEY.startsWith('AIza')) {
-        setApiConfigured(true);
-        setApiKeyStatusMessage('✅ Gemini AI Ready - All features enabled');
-      } else {
-        setApiConfigured(false);
-        setApiKeyStatusMessage(
-          `Gemini API key is not configured. Please set the API_KEY environment variable. 
-          For local development, you might need to configure it in your build tool (e.g., VITE_API_KEY for Vite apps).`
-        );
-      }
+  // Reusable proofreading logic
+  const proofreadText = useCallback(async ({
+    textToProofread,
+    setLoading,
+    setError,
+    setResult,
+  }: {
+    textToProofread: string;
+    setLoading: React.Dispatch<React.SetStateAction<boolean>>;
+    setError: React.Dispatch<React.SetStateAction<string | null>>;
+    setResult: React.Dispatch<React.SetStateAction<string | null>>;
+  }) => {
+    if (!textToProofread.trim()) {
+      alert('Please enter text to proofread.');
+      return;
     }
-  }, []); // Setters are stable, no need to list.
 
-  useEffect(() => {
-    checkApiKeyStatus();
-  }, [checkApiKeyStatus]);
+    setLoading(true);
+    setResult(null);
+    setError(null);
 
-  const handleSelectApiKey = useCallback(async () => {
-    if (window.aistudio && typeof window.aistudio.openSelectKey === 'function' && !apiIsSelecting) {
-      setApiIsSelecting(true);
+    // --- START of Chrome AI Proofreader API Integration ---
+    if (window.ai && 'proofread' in window.ai) {
       try {
-        await window.aistudio.openSelectKey();
-        await checkApiKeyStatus(); // Await the status check to ensure UI updates
-      } catch (e: any) {
-        console.error("Error opening API key selection dialog:", e);
-        setApiKeyStatusMessage(`Failed to open API key selection: ${e.message}`);
+        const result = await window.ai.proofread({ text: textToProofread });
+        setResult(result.text);
+      } catch (error) {
+        console.error('Chrome AI Proofread Error:', error);
+        setError('Proofreading failed using Chrome AI. Ensure Chrome AI features are enabled and permissions are granted.');
       } finally {
-        setApiIsSelecting(false);
+        setLoading(false);
       }
-    }
-  }, [apiIsSelecting, checkApiKeyStatus, setApiIsSelecting, setApiKeyStatusMessage]); // Added setters to dependencies.
-
-  const handleTabChange = useCallback((tab: TabName) => {
-    setActiveTab(tab);
-    // When switching tabs, clear recording if active
-    if (isRecording) {
-      handleStopRecording();
-    }
-  }, [isRecording, handleStopRecording, setActiveTab]); // Added setters to dependencies.
-
-  // Fix: Use a type alias for the generic function signature to avoid potential parsing issues with generics in `useCallback`'s immediate function.
-  type ExecuteGeminiCallFunc = <T>(action: () => Promise<T>, setError: (msg: string | null) => void) => Promise<T | undefined>;
-
-  const executeGeminiCall: ExecuteGeminiCallFunc = useCallback(
-    async (action, setError) => { // T is inferred from 'action'
-      setError(null); // Clear previous error at the start of execution
-      try {
-        const result = await action();
-        return result;
-      } catch (error: any) {
-        let errorMessageText = error instanceof Error ? error.message : String(error);
-
-        // Check for API key configuration error coming from geminiService.ts
-        if (errorMessageText.includes("Gemini API key is not configured.") && window.aistudio) {
-          errorMessageText = "Gemini API key is not configured. Please select your API key again from the platform dialog.";
-          console.warn("API key not configured internally, prompting re-selection via aistudio.");
-          setError(errorMessageText);
-          await checkApiKeyStatus(); // Trigger re-check to show select key button
-        }
-        // Check for "Requested entity was not found." which often indicates an invalid/expired API key in the API response itself
-        else if (errorMessageText.includes("Requested entity was not found.") && window.aistudio) {
-          errorMessageText = "Your API key might be invalid or expired. Please re-select it.";
-          console.warn("API returned 'Requested entity not found', prompting re-selection.");
-          setError(errorMessageText);
-          await checkApiKeyStatus(); // Trigger re-check to show select key button
-        } else {
-          setError(errorMessageText);
-        }
-        // Return undefined on error to indicate failure to the caller
-        return undefined; 
-      }
-    },
-    [checkApiKeyStatus] // checkApiKeyStatus is a dependency. setError is a setter, so stable.
-  );
-
-
-  const handleTranslateJargon = useCallback(async () => {
-    if (!translateInput.trim()) {
-      alert('Please enter some medical text to translate');
-      return;
-    }
-    setTranslateLoading(true);
-    setTranslateOutput(null);
-    setTranslateError(null);
-    setTranslateProofreadingResult(null); // Clear proofread result on new submission
-
-
-    try {
-      const prompt = `You are a patient advocate helping people understand medical information.
-
-Medical text: "${translateInput}"
-
-Please provide:
-1. A simple, plain-language explanation of what this means (2-3 sentences)
-2. 5 important questions the patient should ask their doctor about this
-
-Format your response as:
-EXPLANATION:
-[Your simple explanation here]
-
-QUESTIONS TO ASK:
-1. [Question 1]
-2. [Question 2]
-3. [Question 3]
-4. [Question 4]
-5. [Question 5]`;
-
-      const result = await executeGeminiCall(() => callGemini({ prompt }), setTranslateError);
-      if (result) {
-        setTranslateOutput(result.text);
-      }
-    } catch (error) {
-      // Error already handled by executeGeminiCall
-    } finally {
-      setTranslateLoading(false);
-    }
-  }, [translateInput, executeGeminiCall, setTranslateLoading, setTranslateOutput, setTranslateError, setTranslateProofreadingResult]); // Added all state variables and setters to dependencies
-
-  const handlePrepareAppointment = useCallback(async () => {
-    if (!prepareInput.trim()) {
-      alert('Please describe your symptoms');
-      return;
-    }
-    setPrepareLoading(true);
-    setPrepareOutput(null);
-    setPrepareError(null);
-    setPrepareGroundingUrls(null); // Clear previous URLs
-    setPrepareProofreadingResult(null); // Clear proofread result on new submission
-
-
-    try {
-      const prompt = `You are a patient advocate helping someone prepare for a doctor's appointment. Provide up-to-date and accurate information.
-
-Symptoms: "${prepareInput}"
-
-Create a comprehensive appointment preparation guide with:
-1. Key information to tell the doctor (5-6 specific points)
-2. Important questions to ask (5-7 questions)
-3. Red flags to emphasize (2-3 points)
-
-Format clearly with headers and bullet points using markdown.`; // Added markdown instruction
-
-      const result = await executeGeminiCall(
-        () => callGemini({ prompt, useSearchGrounding: true }), // Enable search grounding
-        setPrepareError
-      );
-      if (result) {
-        setPrepareOutput(result.text);
-        setPrepareGroundingUrls(result.groundingUrls || null); // Store URLs
-      }
-    } catch (error) {
-      // Error already handled by executeGeminiCall
-    } finally {
-      setPrepareLoading(false);
-    }
-  }, [prepareInput, executeGeminiCall, setPrepareLoading, setPrepareOutput, setPrepareError, setPrepareGroundingUrls, setPrepareProofreadingResult]); // Added all state variables and setters to dependencies
-
-  // Reusable image handling logic
-  const handleImageChange = useCallback((event: React.ChangeEvent<HTMLInputElement>, setImageFile: React.Dispatch<React.SetStateAction<File | null>>, setImagePreviewUrl: React.Dispatch<React.SetStateAction<string | null>>) => {
-    if (event.target.files && event.target.files[0]) {
-      const file = event.target.files[0];
-      setImageFile(file);
-      setImagePreviewUrl(URL.createObjectURL(file));
     } else {
-      setImageFile(null);
-      setImagePreviewUrl(null);
-    }
-  }, []); // Setters are passed as arguments.
-
-  const handleClearImage = useCallback((setImageFile: React.Dispatch<React.SetStateAction<File | null>>, setImagePreviewUrl: React.Dispatch<React.SetStateAction<string | null>>, inputElementId: string) => {
-    setImageFile(null);
-    setImagePreviewUrl(null);
-    // Also clear the file input value
-    const fileInput = document.getElementById(inputElementId) as HTMLInputElement;
-    if (fileInput) fileInput.value = '';
-  }, []); // Setters are passed as arguments.
-
-  // Specific image handlers for Summarize
-  const handleSummarizeImageChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    handleImageChange(event, setSummarizeImageFile, setSummarizeImagePreviewUrl);
-  }, [handleImageChange, setSummarizeImageFile, setSummarizeImagePreviewUrl]); // Added setters to dependencies.
-
-  const handleClearSummarizeImage = useCallback(() => {
-    handleClearImage(setSummarizeImageFile, setSummarizeImagePreviewUrl, 'summarize-image-input');
-  }, [handleClearImage, setSummarizeImageFile, setSummarizeImagePreviewUrl]); // Added setters to dependencies.
-
-  // Specific image handlers for Labs
-  const handleLabsImageChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    handleImageChange(event, setLabsImageFile, setLabsImagePreviewUrl);
-  }, [handleImageChange, setLabsImageFile, setLabsImagePreviewUrl]); // Added setters to dependencies.
-
-  const handleClearLabsImage = useCallback(() => {
-    handleClearImage(setLabsImageFile, setLabsImagePreviewUrl, 'labs-image-input');
-  }, [handleClearImage, setLabsImageFile, setLabsImagePreviewUrl]); // Added setters to dependencies.
-
-
-  const handleSummarizeNotes = useCallback(async () => {
-    if (!summarizeInput.trim() && !summarizeImageFile) {
-      alert('Please paste your appointment notes or upload an image of them');
-      return;
-    }
-    setSummarizeLoading(true);
-    setSummarizeOutput(null);
-    setSummarizeError(null);
-    setSummarizeProofreadingResult(null); // Clear proofread result on new submission
-    setExtractedMedications(null); // Clear previous medication extraction
-
-
-    try {
-      const prompt = `You are a patient advocate helping someone understand their medical appointment notes or prescription.
-Analyze the provided information (text and/or image). If no clear medical information is found in the input, please state "No clear medical information found in the provided input."
-
-If it's a prescription:
-- Identify medication name(s), dosage, frequency, and any specific instructions.
-- Provide a clear, simple explanation of the medication's purpose (general, not patient-specific).
-
-If it's general notes:
-- Provide a clear summary of what the doctor said (2-3 sentences).
-- List specific action items (medications, tests, follow-ups).
-- Indicate when to follow up or call the doctor.
-
-Combine these into a patient-friendly response. Use markdown for lists and emphasis.
-Specifically, if medications are identified, format them under a "MEDICATION DETAILS:" header.
-
-Doctor's notes/prescription (text): "${summarizeInput}"
-(If an image is also provided, consider it part of the notes/prescription.)`;
-
-      const result = await executeGeminiCall(
-        () => callGemini({ prompt, imageFile: summarizeImageFile || undefined }),
-        setSummarizeError
-      );
-      
-      if (result) {
-        setSummarizeOutput(result.text);
-
-        // Attempt to extract medication details for dedicated display
-        const medicationRegex = /MEDICATION DETAILS:([\s\S]*)/i;
-        const medicationMatch = result.text.match(medicationRegex);
-        if (medicationMatch && medicationMatch[1].trim()) {
-          setExtractedMedications(medicationMatch[1].trim());
+      // --- Fallback to existing Gemini Proofread logic ---
+      try {
+        const result = await callGeminiProofread(textToProofread);
+        if (result) {
+          setResult(result);
         }
+      } catch (error) {
+        console.error('Gemini Proofread Error:', error);
+        setError(error instanceof Error ? error.message : 'An unknown error occurred during Gemini proofreading.');
+      } finally {
+        setLoading(false);
       }
-    } catch (error) {
-      // Error already handled by executeGeminiCall
-    } finally {
-      setSummarizeLoading(false);
+      // --- END of Fallback ---
     }
-  }, [summarizeInput, summarizeImageFile, executeGeminiCall, setSummarizeLoading, setSummarizeOutput, setSummarizeError, setSummarizeProofreadingResult, setExtractedMedications]); // Added all state variables and setters to dependencies
+  }, []); // Dependencies are stable, so empty array is fine.
 
-  const handleExplainLabs = useCallback(async () => {
-    if (!labsInput.trim() && !labsImageFile) {
-      alert('Please paste your lab results or upload an image of them');
+
+  const handleStartRecording = useCallback(async () => {
+    // Check if API key is configured before starting recording
+    if (!apiConfigured) {
+      // Offer to select key if not configured
+      setShowSelectKeyButton(true);
+      setApiKeyStatusMessage('Please select an API key to enable the recording feature.');
       return;
     }
-    setLabsLoading(true);
-    setLabsOutput(null);
-    setLabsError(null);
-    setLabsGroundingUrls(null); // Clear previous URLs
-    setLabsProofreadingResult(null); // Clear proofread result on new submission
 
-
-    try {
-      const prompt = `You are a patient advocate helping someone understand their lab results. Provide up-to-date and accurate information.
-Analyze the provided information (text and/or image) to identify specific lab tests and their values. If no clear lab results are found, please state "No clear lab results found in the provided input."
-
-Lab results: "${labsInput}"
-(If an image is also provided, extract lab details from it.)
-
-Please provide:
-Overall Summary: [A concise 2-3 sentence summary of the main findings and implications of all the lab results together.]
-
-For each test result identified, provide:
-1. What it measures in simple terms
-2. Whether it appears high, low, or normal (if obvious from typical ranges)
-3. What it might mean (general information, not diagnosis)
-4. What questions to ask the doctor
-
-Format clearly with "Overall Summary:" followed by headers for each test. Use markdown for lists and emphasis.`; // Added markdown instruction
-
-      const result = await executeGeminiCall(
-        () => callGemini({ prompt, useSearchGrounding: true, imageFile: labsImageFile || undefined }), // Enable search grounding and image
-        setLabsError
-      );
-      if (result) {
-        setLabsOutput(result.text);
-        setLabsGroundingUrls(result.groundingUrls || null); // Store URLs
-      }
-    } catch (error) {
-      // Error already handled by executeGeminiCall
-    } finally {
-      setLabsLoading(false);
-    }
-  }, [labsInput, labsImageFile, executeGeminiCall, setLabsLoading, setLabsOutput, setLabsError, setLabsGroundingUrls, setLabsProofreadingResult]); // Added all state variables and setters to dependencies
-
-// Chrome AI Proofreader API Integration
-const handleProofread = useCallback(async ({
-  currentInput,
-  setProofreadingLoading,
-  setProofreadingError,
-  setProofreadingResult,
-}: {
-  currentInput: string;
-  setProofreadingLoading: React.Dispatch<React.SetStateAction<boolean>>;
-  setProofreadingError: React.Dispatch<React.SetStateAction<string | null>>;
-  setProofreadingResult: React.Dispatch<React.SetStateAction<string | null>>;
-}) => {
-  if (!currentInput.trim()) {
-    alert('Please enter text to proofread.');
-    return;
-  }
-
-  setProofreadingLoading(true);
-  setProofreadingResult(null);
-  setProofreadingError(null);
-
-  // --- START of Chrome AI Proofreader API Integration ---
-  if ('ai' in window && 'proofread' in window.ai) {
-    try {
-      // 1. Call the Chrome AI Proofreader API
-      const result = await window.ai.proofread({ text: currentInput });
-
-      // The result object contains the corrected text
-      const correctedText = result.text;
-
-      // 2. Set the result state with the corrected text
-      setProofreadingResult(correctedText);
-
-      // Optional: Alert for successful use of the new feature
-      alert('Proofreading complete! The text has been corrected by the Chrome AI Proofreader API.');
-
-    } catch (error) {
-      // Handle errors (e.g., user denied permission, API not available)
-      console.error('Chrome AI Proofread Error:', error);
-      setProofreadingError('Proofreading failed. Please ensure Chrome AI features are enabled.');
-    } finally {
-      setProofreadingLoading(false);
-    }
-  } else {
-    // --- Fallback to existing Gemini Proofread logic ---
-    try {
-      const result = await executeGeminiCall(
-        () => callGeminiProofread(currentInput),
-        setProofreadingError
-      );
-
-      if (result) { // Only set result if not undefined
-        setProofreadingResult(result);
-      }
-    } catch (error) {
-      // Error already handled by executeGeminiCall
-    } finally {
-      setProofreadingLoading(false);
-    }
-    // --- END of Fallback ---
-  }
-  // --- END of Chrome AI Proofreader API Integration ---
-
-}, [executeGeminiCall]);
-
-  const handleProofreadTranslate = useCallback(() => {
-    handleProofread(
-      translateInput,
-      setTranslateProofreadingLoading,
-      setTranslateProofreadingError,
-      setTranslateProofreadingResult
-    );
-  }, [translateInput, handleProofread, setTranslateProofreadingLoading, setTranslateProofreadingError, setTranslateProofreadingResult]); // Added all state variables and setters to dependencies.
-
-  const handleProofreadPrepare = useCallback(() => {
-    handleProofread(
-      prepareInput,
-      setPrepareProofreadingLoading,
-      setPrepareProofreadingError,
-      setPrepareProofreadingResult
-    );
-  }, [prepareInput, handleProofread, setPrepareProofreadingLoading, setPrepareProofreadingError, setPrepareProofreadingResult]); // Added all state variables and setters to dependencies.
-
-  const handleProofreadSummarize = useCallback(() => {
-    handleProofread(
-      summarizeInput,
-      setSummarizeProofreadingLoading,
-      setSummarizeProofreadingError,
-      setSummarizeProofreadingResult
-    );
-  }, [summarizeInput, handleProofread, setSummarizeProofreadingLoading, setSummarizeProofreadingError, setSummarizeProofreadingResult]); // Added all state variables and setters to dependencies.
-
-  const handleProofreadLabs = useCallback(() => {
-    handleProofread(
-      labsInput,
-      setLabsProofreadingLoading,
-      setLabsProofreadingError,
-      setLabsProofreadingResult
-    );
-  }, [labsInput, handleProofread, setLabsProofreadingLoading, setLabsProofreadingError, setLabsProofreadingResult]); // Added all state variables and setters to dependencies.
-
-
-  // Live API Recording Functions
-  const handleStartRecording = useCallback(async () => {
     setLiveLoading(true);
     setLiveError(null);
+    setIsRecording(true);
     setTranscriptionHistory([]);
     setCurrentLiveInputTranscription('');
     setCurrentLiveOutputTranscription('');
-    // Fix: Clear refs when starting a new session
     latestInputTranscriptionRef.current = '';
     latestOutputTranscriptionRef.current = '';
+
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
 
-      // Fix: Ensure AudioContext is initialized with appropriate fallback for webkitAudioContext as per guidelines
-      const inputAudioContext = new (window.AudioContext || window.webkitAudioContext!)({ sampleRate: 16000 });
-      inputAudioContextRef.current = inputAudioContext;
-      // Fix: Ensure AudioContext is initialized with appropriate fallback for webkitAudioContext as per guidelines
-      const outputAudioContext = new (window.AudioContext || window.webkitAudioContext!)({ sampleRate: 24000 });
-      outputAudioContextRef.current = outputAudioContext;
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      inputAudioContextRef.current = new AudioContextClass({ sampleRate: 16000 });
+      outputAudioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
+      outputNodeRef.current = outputAudioContextRef.current.createGain(); // Initialize outputNodeRef
+      outputNodeRef.current.connect(outputAudioContextRef.current.destination);
 
-      // Initialize output node and connect it to the destination
-      const outputNode = outputAudioContext.createGain();
-      outputNode.connect(outputAudioContext.destination);
-      outputNodeRef.current = outputNode;
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY }); // Create new instance for up-to-date key
 
-      const source = inputAudioContext.createMediaStreamSource(stream);
-      const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1);
-      scriptProcessorNodeRef.current = scriptProcessor;
-
-      // Create new instance to ensure up-to-date API key
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY }); 
-
-      liveSessionPromiseRef.current = ai.live.connect({
+      const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         callbacks: {
           onopen: () => {
             console.debug('Live session opened');
-            setIsRecording(true);
-            setLiveLoading(false);
+            const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
+            const scriptProcessor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
               const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
               const pcmBlob = createBlob(inputData);
-              // CRITICAL: Solely rely on sessionPromise resolves and then call `session.sendRealtimeInput`, **do not** add other condition checks.
-              liveSessionPromiseRef.current?.then((session) => {
+              sessionPromise.then((session) => {
                 session.sendRealtimeInput({ media: pcmBlob });
               });
             };
             source.connect(scriptProcessor);
-            scriptProcessor.connect(inputAudioContext.destination);
+            scriptProcessor.connect(inputAudioContextRef.current!.destination);
+            scriptProcessorNodeRef.current = scriptProcessor;
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Audio output from model
-            const base64EncodedAudioString = message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
+            // Audio output processing
+            const base64EncodedAudioString = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (base64EncodedAudioString) {
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputAudioContextRef.current!.currentTime);
+              nextStartTimeRef.current = Math.max(
+                nextStartTimeRef.current,
+                outputAudioContextRef.current!.currentTime,
+              );
               const audioBuffer = await decodeAudioData(
                 decode(base64EncodedAudioString),
                 outputAudioContextRef.current!,
                 24000,
                 1,
               );
-              const audioSource = outputAudioContextRef.current!.createBufferSource();
-              audioSource.buffer = audioBuffer;
-              // Connect to the outputNode, which is already connected to the destination
-              audioSource.connect(outputNodeRef.current!); 
-              audioSource.addEventListener('ended', () => {
-                audioSourcesRef.current.delete(audioSource);
+              const source = outputAudioContextRef.current!.createBufferSource();
+              source.buffer = audioBuffer;
+              source.connect(outputNodeRef.current!);
+              source.addEventListener('ended', () => {
+                audioSourcesRef.current.delete(source);
               });
 
-              audioSource.start(nextStartTimeRef.current);
+              source.start(nextStartTimeRef.current);
               nextStartTimeRef.current = nextStartTimeRef.current + audioBuffer.duration;
-              audioSourcesRef.current.add(audioSource);
+              audioSourcesRef.current.add(source);
             }
 
-            // Transcription
-            if (message.serverContent?.outputTranscription) {
-              // Fix: Use the ref to update instead of state directly to avoid stale closures.
-              latestOutputTranscriptionRef.current += message.serverContent!.outputTranscription!.text;
-              setCurrentLiveOutputTranscription(latestOutputTranscriptionRef.current);
-            }
-            if (message.serverContent?.inputTranscription) {
-              // Fix: Use the ref to update instead of state directly to avoid stale closures.
-              latestInputTranscriptionRef.current += message.serverContent!.inputTranscription!.text;
-              setCurrentLiveInputTranscription(latestInputTranscriptionRef.current);
-            }
-
-            // Turn complete
-            if (message.serverContent?.turnComplete) {
-              // Fix: Use the latest ref values for history to avoid stale closures
-              const finalInputTranscription = latestInputTranscriptionRef.current;
-              const finalOutputTranscription = latestOutputTranscriptionRef.current;
-
-              if (finalInputTranscription) {
-                setTranscriptionHistory(prev => [...prev, { speaker: 'User', text: finalInputTranscription.trim() }]);
-                setCurrentLiveInputTranscription(''); // Clear for next turn's "current speaking" UI
-                latestInputTranscriptionRef.current = ''; // Clear ref too
-              }
-              if (finalOutputTranscription) {
-                setTranscriptionHistory(prev => [...prev, { speaker: 'AI', text: finalOutputTranscription.trim() }]);
-                setCurrentLiveOutputTranscription(''); // Clear for next turn's "current speaking" UI
-                latestOutputTranscriptionRef.current = ''; // Clear ref too
-              }
-            }
-            
-            // Interrupted
             const interrupted = message.serverContent?.interrupted;
             if (interrupted) {
-              for (const sourceNode of audioSourcesRef.current.values()) {
-                sourceNode.stop();
-                audioSourcesRef.current.delete(sourceNode);
+              for (const source of audioSourcesRef.current.values()) {
+                source.stop();
+                audioSourcesRef.current.delete(source);
               }
               nextStartTimeRef.current = 0;
             }
+
+            // Transcription processing
+            if (message.serverContent?.outputTranscription) {
+              latestOutputTranscriptionRef.current += message.serverContent.outputTranscription.text;
+              setCurrentLiveOutputTranscription(latestOutputTranscriptionRef.current);
+            } else if (message.serverContent?.inputTranscription) {
+              latestInputTranscriptionRef.current += message.serverContent.inputTranscription.text;
+              setCurrentLiveInputTranscription(latestInputTranscriptionRef.current);
+            }
+
+            if (message.serverContent?.turnComplete) {
+              const fullInputTranscription = latestInputTranscriptionRef.current.trim();
+              const fullOutputTranscription = latestOutputTranscriptionRef.current.trim();
+
+              if (fullInputTranscription) {
+                setTranscriptionHistory(prev => [...prev, { speaker: 'User', text: fullInputTranscription }]);
+              }
+              if (fullOutputTranscription) {
+                setTranscriptionHistory(prev => [...prev, { speaker: 'Model', text: fullOutputTranscription }]);
+              }
+
+              latestInputTranscriptionRef.current = '';
+              latestOutputTranscriptionRef.current = '';
+              setCurrentLiveInputTranscription('');
+              setCurrentLiveOutputTranscription('');
+            }
+
+            // Handle function calls (if any, though not implemented in this app yet)
+            if (message.toolCall) {
+              console.log('Function call received:', message.toolCall);
+              // Implement logic to execute function and send tool response if needed.
+            }
+
           },
           onerror: (e: ErrorEvent) => {
             console.error('Live session error:', e);
-            // Handle specific API key error for Live API
-            if (e.message.includes("Requested entity was not found.") && window.aistudio) {
-              setLiveError("Your API key might be invalid or expired for Live API. Please re-select it.");
-              checkApiKeyStatus(); // Trigger re-check to show select key button
-            } else {
-              setLiveError(`Live session error: ${e.message}`);
-            }
-            // Fix: Added handleStopRecording to clean up after error
-            handleStopRecording(); // Stop recording cleanly
+            setLiveError('Live conversation encountered an error: ' + e.message);
+            handleStopRecording();
           },
           onclose: (e: CloseEvent) => {
             console.debug('Live session closed:', e);
-            // Don't call handleStopRecording here to avoid loop, just reset states
-            setIsRecording(false);
-            setLiveLoading(false);
-            if (e.code !== 1000) { // 1000 is normal closure
-              setLiveError(`Live session closed unexpectedly: Code ${e.code}`);
+            if (!e.wasClean) {
+              setLiveError('Live conversation closed unexpectedly.');
             }
+            handleStopRecording();
           },
         },
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } }, // Use Zephyr voice
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
           },
+          systemInstruction: 'You are a friendly and helpful medical advocate. You explain medical terms, help prepare for appointments, summarize notes, and explain lab results.',
           inputAudioTranscription: {}, // Enable transcription for user input
           outputAudioTranscription: {}, // Enable transcription for model output
-          systemInstruction: 'You are a helpful patient advocate assistant during a medical consultation.',
         },
       });
-      liveSessionRef.current = await liveSessionPromiseRef.current; // Store the resolved session
+      liveSessionPromiseRef.current = sessionPromise;
+      liveSessionRef.current = await sessionPromise;
 
-    } catch (error: any) {
-      console.error('Error starting recording:', error);
-      let errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes("Permission denied")) {
-        errorMessage = "Microphone access denied. Please allow microphone usage to record.";
-      } else if (errorMessage.includes("Gemini API key is not configured.") && window.aistudio) {
-        errorMessage = "Gemini API key is not configured. Please select your API key again from the platform dialog.";
-        await checkApiKeyStatus(); // Trigger re-check with await
-      }
-      setLiveError(`Failed to start recording: ${errorMessage}`);
-      setLiveLoading(false);
+    } catch (err: any) {
+      console.error('Error starting live recording:', err);
+      setLiveError('Failed to start recording: ' + err.message);
       setIsRecording(false);
+      setLiveLoading(false);
+      handleStopRecording(); // Ensure all resources are cleaned up
     }
-  }, [
-    checkApiKeyStatus,
-    handleStopRecording, // This needs to be a dependency
-    mediaStreamRef,
-    inputAudioContextRef,
-    outputAudioContextRef,
-    outputNodeRef,
-    scriptProcessorNodeRef,
-    liveSessionPromiseRef,
-    liveSessionRef,
-    nextStartTimeRef,
-    audioSourcesRef,
-    latestInputTranscriptionRef,
-    latestOutputTranscriptionRef,
-    setLiveLoading,
-    setLiveError,
-    setTranscriptionHistory,
-    setCurrentLiveInputTranscription,
-    setCurrentLiveOutputTranscription,
-    setIsRecording,
-  ]);
+  }, [apiConfigured, handleStopRecording]); // handleStopRecording is a dependency
 
-  // Cleanup effect
+  // Generic function to execute Gemini API calls and handle common loading/error states
+  const executeGeminiCall = useCallback(async (
+    apiCall: () => Promise<GeminiResponseData | string | undefined>,
+    setErrorState: React.Dispatch<React.SetStateAction<string | null>>
+  ): Promise<GeminiResponseData | string | undefined> => {
+    setErrorState(null); // Clear previous errors
+    if (!apiConfigured) {
+      setShowSelectKeyButton(true);
+      setApiKeyStatusMessage('Please select an API key to enable this feature.');
+      return undefined;
+    }
+    try {
+      return await apiCall();
+    } catch (err: any) {
+      console.error("API Call Error:", err);
+      setErrorState(err.message || "An unexpected error occurred.");
+      // Check if the error indicates a missing API key for Veo models (billing link applies)
+      if (typeof err.message === 'string' && err.message.includes('Requested entity was not found.')) {
+        setShowSelectKeyButton(true);
+        setApiKeyStatusMessage('There was an issue with the API key. Please re-select your API key. (A link to billing documentation is provided in the key selection dialog.)');
+      }
+      return undefined; // Indicate failure
+    }
+  }, [apiConfigured]);
+
+
+  // Effect to check API key status on component mount
   useEffect(() => {
-    return () => {
-      // Ensure everything is stopped if component unmounts
-      handleStopRecording();
-    };
-  }, [handleStopRecording]); // handleStopRecording is a useCallback, so must be dependency.
+    async function checkApiKey() {
+      if (window.aistudio) {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        setApiConfigured(hasKey);
+        if (!hasKey) {
+          setShowSelectKeyButton(true);
+          setApiKeyStatusMessage('Please select your Gemini API key to use the app.');
+        } else {
+          setApiKeyStatusMessage('API Key is configured.');
+        }
+      } else {
+        // Fallback for environments without window.aistudio (e.g., pure web)
+        if (process.env.API_KEY) {
+          setApiConfigured(true);
+          setApiKeyStatusMessage('API Key is configured from environment variable.');
+        } else {
+          setApiKeyStatusMessage('API Key is not configured. Please set API_KEY environment variable.');
+          setShowSelectKeyButton(false); // No select key button if aistudio isn't present
+        }
+      }
+    }
+    checkApiKey();
+  }, []);
 
+  const handleSelectApiKey = useCallback(async () => {
+    if (window.aistudio) {
+      setApiIsSelecting(true);
+      setApiKeyStatusMessage('Opening API key selection dialog...');
+      try {
+        await window.aistudio.openSelectKey();
+        // Assuming key selection was successful; re-check on next API call
+        setApiConfigured(true);
+        setShowSelectKeyButton(false);
+        setApiKeyStatusMessage('API key selected. You can now use the features.');
+      } catch (error) {
+        console.error('Error opening API key selection:', error);
+        setApiKeyStatusMessage('Failed to open API key selection dialog.');
+      } finally {
+        setApiIsSelecting(false);
+      }
+    } else {
+      alert("This environment does not support `window.aistudio.openSelectKey()` for API key selection.");
+    }
+  }, []);
+
+  const handleTranslateJargon = useCallback(async () => {
+    setTranslateLoading(true);
+    setTranslateOutput(null);
+    setTranslateProofreadingResult(null); // Clear proofreading results on new translation
+    const result = await executeGeminiCall(
+      () => callGemini({
+        prompt: `Translate the following medical jargon into simple, easy-to-understand language for a patient. Maintain the core meaning but use analogies or common terms where appropriate. If the text is already simple, just rephrase it slightly to sound even more natural without over-simplifying if complexity is necessary.\n\nMedical Jargon: "${translateInput}"`,
+        systemInstruction: "You are a friendly, empathetic medical advocate, skilled at simplifying complex medical information.",
+      }),
+      setTranslateError
+    );
+
+    if (result) {
+      setTranslateOutput(typeof result === 'string' ? result : result.text);
+    }
+    setTranslateLoading(false);
+  }, [translateInput, executeGeminiCall]);
+
+  const handlePrepareAppointment = useCallback(async () => {
+    setPrepareLoading(true);
+    setPrepareOutput(null);
+    setPrepareGroundingUrls(null);
+    setPrepareProofreadingResult(null); // Clear proofreading results
+    const result = await executeGeminiCall(
+      () => callGemini({
+        prompt: `I am preparing for an appointment and I want to make sure I cover all my concerns. Here are my notes:\n\n"${prepareInput}"\n\nPlease help me organize these notes, suggest questions I should ask my doctor based on them, and highlight any important points I should definitely mention. Provide information grounded by Google Search if applicable.`,
+        systemInstruction: "You are a helpful medical advocate assisting patients in preparing for doctor's appointments.",
+        useSearchGrounding: true,
+      }),
+      setPrepareError
+    );
+
+    if (result) {
+      setPrepareOutput(typeof result === 'string' ? result : result.text);
+      if (typeof result !== 'string' && result.groundingUrls) {
+        setPrepareGroundingUrls(result.groundingUrls);
+      }
+    }
+    setPrepareLoading(false);
+  }, [prepareInput, executeGeminiCall]);
+
+  const handleSummarizeNotes = useCallback(async () => {
+    setSummarizeLoading(true);
+    setSummarizeOutput(null);
+    setExtractedMedications(null);
+    setSummarizeProofreadingResult(null); // Clear proofreading results
+    let prompt: string;
+    let systemInstruction: string;
+
+    if (summarizeInput.trim() && summarizeImageFile) {
+      prompt = `Summarize the following medical notes and extract any mentioned medications or treatment plans. Then list all medications under a separate heading "Medications:". Combine information from the text and the image.
+
+Notes: "${summarizeInput}"`;
+      systemInstruction = "You are a meticulous medical assistant, capable of summarizing notes and identifying key medical details from both text and visual input.";
+    } else if (summarizeInput.trim()) {
+      prompt = `Summarize the following medical notes and extract any mentioned medications or treatment plans. Then list all medications under a separate heading "Medications:".
+
+Notes: "${summarizeInput}"`;
+      systemInstruction = "You are a meticulous medical assistant, capable of summarizing notes and identifying key medical details.";
+    } else if (summarizeImageFile) {
+      prompt = `Summarize the medical notes provided in the image and extract any mentioned medications or treatment plans. Then list all medications under a separate heading "Medications:".`;
+      systemInstruction = "You are a meticulous medical assistant, capable of summarizing notes and identifying key medical details from visual input.";
+    } else {
+      alert('Please enter some text or upload an image to summarize.');
+      setSummarizeLoading(false);
+      return;
+    }
+
+    const result = await executeGeminiCall(
+      () => callGemini({
+        prompt,
+        systemInstruction,
+        imageFile: summarizeImageFile,
+      }),
+      setSummarizeError
+    );
+
+    if (result) {
+      const fullText = typeof result === 'string' ? result : result.text;
+      const medicationRegex = /Medications:\s*([\s\S]*)/i;
+      const medicationMatch = fullText.match(medicationRegex);
+
+      if (medicationMatch && medicationMatch[1]) {
+        setExtractedMedications(medicationMatch[1].trim());
+        setSummarizeOutput(fullText.replace(medicationRegex, '').trim());
+      } else {
+        setSummarizeOutput(fullText);
+        setExtractedMedications(null);
+      }
+    }
+    setSummarizeLoading(false);
+  }, [summarizeInput, summarizeImageFile, executeGeminiCall]);
+
+  const handleLabsExplanation = useCallback(async () => {
+    setLabsLoading(true);
+    setLabsOutput(null);
+    setLabsGroundingUrls(null);
+    setLabsProofreadingResult(null); // Clear proofreading results
+    let prompt: string;
+    let systemInstruction: string;
+
+    if (labsInput.trim() && labsImageFile) {
+      prompt = `Explain the following lab results in simple terms for a patient, highlighting what is normal, what is abnormal, and what it might mean. Combine information from the text and the image. Use Google Search for additional context if necessary.
+
+Lab Results: "${labsInput}"`;
+      systemInstruction = "You are a friendly medical advocate, skilled at explaining lab results clearly and empathetically.";
+    } else if (labsInput.trim()) {
+      prompt = `Explain the following lab results in simple terms for a patient, highlighting what is normal, what is abnormal, and what it might mean. Use Google Search for additional context if necessary.
+
+Lab Results: "${labsInput}"`;
+      systemInstruction = "You are a friendly medical advocate, skilled at explaining lab results clearly and empathetically.";
+    } else if (labsImageFile) {
+      prompt = `Explain the lab results provided in the image in simple terms for a patient, highlighting what is normal, what is abnormal, and what it might mean. Use Google Search for additional context if necessary.`;
+      systemInstruction = "You are a friendly medical advocate, skilled at explaining lab results clearly and empathetically from visual input.";
+    } else {
+      alert('Please enter some text or upload an image of lab results.');
+      setLabsLoading(false);
+      return;
+    }
+
+    const result = await executeGeminiCall(
+      () => callGemini({
+        prompt,
+        systemInstruction,
+        useSearchGrounding: true,
+        imageFile: labsImageFile,
+      }),
+      setLabsError
+    );
+
+    if (result) {
+      setLabsOutput(typeof result === 'string' ? result : result.text);
+      if (typeof result !== 'string' && result.groundingUrls) {
+        setLabsGroundingUrls(result.groundingUrls);
+      }
+    }
+    setLabsLoading(false);
+  }, [labsInput, labsImageFile, executeGeminiCall]);
+
+  // Handlers for image file changes
+  const handleSummarizeImageChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setSummarizeImageFile(file);
+      setSummarizeImagePreviewUrl(URL.createObjectURL(file));
+    } else {
+      setSummarizeImageFile(null);
+      setSummarizeImagePreviewUrl(null);
+    }
+  }, []);
+
+  const handleLabsImageChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setLabsImageFile(file);
+      setLabsImagePreviewUrl(URL.createObjectURL(file));
+    } else {
+      setLabsImageFile(null);
+      setLabsImagePreviewUrl(null);
+    }
+  }, []);
+
+  const renderApiKeyStatus = () => {
+    if (showSelectKeyButton) {
+      return (
+        <div className="bg-blue-100 border-l-4 border-blue-500 text-blue-700 p-4 mb-6 rounded-lg shadow-md flex items-center justify-between">
+          <p className="font-medium">{apiKeyStatusMessage}</p>
+          <button
+            onClick={handleSelectApiKey}
+            className="ml-4 bg-primary hover:bg-primary-hover text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-75 transition duration-150 ease-in-out"
+            disabled={apiIsSelecting}
+          >
+            {apiIsSelecting ? 'Selecting...' : 'Select API Key'}
+          </button>
+        </div>
+      );
+    }
+    if (!apiConfigured && !process.env.API_KEY) {
+      return (
+        <div className="bg-red-100 border-l-4 border-error text-red-700 p-4 mb-6 rounded-lg shadow-md">
+          <p className="font-medium">{apiKeyStatusMessage}</p>
+        </div>
+      );
+    }
+    return null; // Key is configured, no message needed
+  };
 
   return (
-    <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-2xl overflow-hidden">
-      <header className="bg-gradient-to-br from-indigo-600 to-purple-800 text-white p-8 text-center">
-        <h1 className="text-4xl font-bold mb-2 flex items-center justify-center gap-3">
-          🩺 Patient Advocate AI
-        </h1>
-        <p className="opacity-90 text-lg">
-          Your personal medical advocate - powered by Gemini AI
-        </p>
-      </header>
+    <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-2xl p-8 transform transition-all duration-300 ease-in-out">
+      <h1 className="text-4xl font-extrabold text-center text-primary mb-8 animate-fade-in">
+        <span className="bg-gradient-to-r from-purple-600 to-indigo-600 text-transparent bg-clip-text">Patient Advocate AI</span>
+      </h1>
 
-      {/* API Key Status Banner */}
-      <div className={`p-5 m-5 rounded-xl text-center ${apiConfigured ? 'bg-green-100 border-2 border-success text-green-800' : 'bg-orange-100 border-2 border-warning text-orange-800'}`}>
-        <h3 className="text-xl font-semibold text-amber-700 mb-3">
-          {apiConfigured ? '✅ Gemini AI Ready' : '🔑 API Key Status'}
-        </h3>
-        <p className="mb-4">{apiKeyStatusMessage}</p>
-        {showSelectKeyButton && (
-          <>
-            <button
-              className="bg-primary text-white py-2 px-4 rounded-lg text-base font-semibold transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed mt-3 mr-2"
-              onClick={handleSelectApiKey}
-              disabled={apiIsSelecting}
-            >
-              {apiIsSelecting ? (
-                  <Spinner size="w-5 h-5" color="border-t-white" className="inline-block mr-2" />
-                ) : (
-                  'Select Gemini API Key'
-                )}
-            </button>
-            <small className="block mt-4 text-amber-900">
-              Billing details:{' '}
-              <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">ai.google.dev/gemini-api/docs/billing</a>
-            </small>
-          </>
-        )}
-        {!apiConfigured && !showSelectKeyButton && ( // Show only if aistudio not available or hasSelectedKey failed and no button is shown
-           <small className="block mt-4 text-amber-900">
-            Don't have an API key? Get one free at{' '}
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Google AI Studio</a>.
-            For local development, please set the <code>API_KEY</code> environment variable.
-          </small>
-        )}
+      {renderApiKeyStatus()}
+
+      <Disclaimer>
+        This AI is for informational purposes only and should not replace professional medical advice. Always consult with a qualified healthcare provider for any health concerns.
+      </Disclaimer>
+
+      <div className="flex justify-center mb-8 bg-gray-100 rounded-lg p-2 shadow-inner">
+        {['translate', 'prepare', 'summarize', 'labs', 'record'].map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab as TabName)}
+            className={`px-6 py-3 mx-1 rounded-md text-lg font-medium transition-all duration-300 ease-in-out
+              ${activeTab === tab
+                ? 'bg-primary text-white shadow-lg transform scale-105'
+                : 'bg-transparent text-textSecondary hover:bg-gray-200 hover:text-textPrimary'
+              }`}
+          >
+            {tab.charAt(0).toUpperCase() + tab.slice(1)}
+          </button>
+        ))}
       </div>
 
-      <nav className="flex border-b-2 border-borderColor overflow-x-auto">
-        <button
-          className={`flex-1 px-4 py-4 border-b-4 border-transparent text-textSecondary font-semibold text-sm transition-all hover:bg-bgSecondary hover:text-primary ${
-            activeTab === 'translate' ? 'border-primary text-primary bg-bgSecondary' : ''
-          }`}
-          onClick={() => handleTabChange('translate')}
-        >
-          📝 Translate Jargon
-        </button>
-        <button
-          className={`flex-1 px-4 py-4 border-b-4 border-transparent text-textSecondary font-semibold text-sm transition-all hover:bg-bgSecondary hover:text-primary ${
-            activeTab === 'prepare' ? 'border-primary text-primary bg-bgSecondary' : ''
-          }`}
-          onClick={() => handleTabChange('prepare')}
-        >
-          📋 Prep Appointment
-        </button>
-        <button
-          className={`flex-1 px-4 py-4 border-b-4 border-transparent text-textSecondary font-semibold text-sm transition-all hover:bg-bgSecondary hover:text-primary ${
-            activeTab === 'summarize' ? 'border-primary text-primary bg-bgSecondary' : ''
-          }`}
-          onClick={() => handleTabChange('summarize')}
-        >
-          💊 Summarize Notes
-        </button>
-        <button
-          className={`flex-1 px-4 py-4 border-b-4 border-transparent text-textSecondary font-semibold text-sm transition-all hover:bg-bgSecondary hover:text-primary ${
-            activeTab === 'labs' ? 'border-primary text-primary bg-bgSecondary' : ''
-          }`}
-          onClick={() => handleTabChange('labs')}
-        >
-          🔬 Explain Labs
-        </button>
-        <button
-          className={`flex-1 px-4 py-4 border-b-4 border-transparent text-textSecondary font-semibold text-sm transition-all hover:bg-bgSecondary hover:text-primary ${
-            activeTab === 'record' ? 'border-primary text-primary bg-bgSecondary' : ''
-          }`}
-          onClick={() => handleTabChange('record')}
-          disabled={!apiConfigured}
-        >
-          🎙️ Record Session
-        </button>
-      </nav>
-
-      <main className="p-6">
-        {/* Translate Jargon Tab */}
+      <div className="tab-content bg-bgSecondary p-6 rounded-lg shadow-lg">
         {activeTab === 'translate' && (
-          <section>
-            <h2 className="text-2xl font-bold text-primary mb-5">Translate Medical Jargon</h2>
-            <Disclaimer>
-              This tool provides general information and should not replace professional medical advice. Always consult with a qualified healthcare provider for diagnosis and treatment.
-            </Disclaimer>
-
-            <div className="mt-6 mb-4">
-              <label htmlFor="translate-input" className="block text-lg font-medium text-textPrimary mb-2">
-                Paste medical text here:
-              </label>
-              <textarea
-                id="translate-input"
-                className="w-full p-3 border border-borderColor rounded-lg focus:ring focus:ring-primary focus:border-primary transition-all text-textPrimary"
-                rows={6}
-                value={translateInput}
-                onChange={(e) => setTranslateInput(e.target.value)}
-                placeholder="e.g., 'The patient presents with dysphagia and odynophagia, requiring an EGD with biopsies to rule out eosinophilic esophagitis.'"
-              ></textarea>
+          <div>
+            <h2 className="text-2xl font-bold text-primary mb-4">Translate Medical Jargon</h2>
+            <p className="text-textSecondary mb-4">
+              Enter medical terms or phrases, and I'll translate them into simple, everyday language.
+            </p>
+            <textarea
+              className="w-full p-3 border border-borderColor rounded-md focus:outline-none focus:ring-2 focus:ring-primary mb-3 text-textPrimary h-32 resize-y"
+              placeholder="e.g., 'Patient presents with severe dyspnea and persistent dysphagia.'"
+              value={translateInput}
+              onChange={(e) => setTranslateInput(e.target.value)}
+            ></textarea>
+            <div className="flex space-x-2 mb-4">
               <button
-                className="bg-primary text-white py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed mt-3 mr-2"
                 onClick={handleTranslateJargon}
-                disabled={translateLoading || !apiConfigured}
+                className="bg-primary hover:bg-primary-hover text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
+                disabled={translateLoading}
               >
-                {translateLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-white" className="inline-block mr-2" />
-                ) : (
-                  'Translate'
-                )}
+                {translateLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Translate
               </button>
               <button
-                className="bg-gray-200 text-textSecondary py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed mt-3"
-                onClick={handleProofreadTranslate}
-                disabled={translateProofreadingLoading || !translateInput.trim()}
+                onClick={() => proofreadText({
+                  textToProofread: translateInput,
+                  setLoading: setTranslateProofreadingLoading,
+                  setError: setTranslateProofreadingError,
+                  setResult: setTranslateProofreadingResult,
+                })}
+                className="bg-secondary hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-secondary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
+                disabled={translateProofreadingLoading}
               >
-                {translateProofreadingLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-gray-700" className="inline-block mr-2" />
-                ) : (
-                  'Proofread Input'
-                )}
+                {translateProofreadingLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Proofread Input
               </button>
             </div>
 
+
             {translateError && <ErrorMessage message={translateError} />}
-            {translateOutput && (
-              <ResultSection
-                title="Simplified Explanation & Questions"
-                content={renderMarkdown(translateOutput)}
-              />
-            )}
-            {translateProofreadingError && <ErrorMessage message={translateProofreadingError} />}
-            {translateProofreadingResult && translateProofreadingResult !== translateInput && (
+            {translateProofreadingError && <ErrorMessage message={`Proofreading Error: ${translateProofreadingError}`} />}
+
+            {translateProofreadingResult && (
               <ResultSection
                 title="Proofread Input"
                 content={renderMarkdown(translateProofreadingResult)}
                 variant="info"
               />
             )}
-            {translateProofreadingResult && translateProofreadingResult === translateInput && !translateProofreadingLoading && (
+            {translateOutput && (
+              <ResultSection
+                title="Translated Explanation"
+                content={renderMarkdown(translateOutput)}
+              />
+            )}
+          </div>
+        )}
+
+        {activeTab === 'prepare' && (
+          <div>
+            <h2 className="text-2xl font-bold text-primary mb-4">Prepare for Appointment</h2>
+            <p className="text-textSecondary mb-4">
+              Enter your concerns, symptoms, or questions, and I'll help you organize them and suggest
+              additional questions to ask your doctor.
+            </p>
+            <textarea
+              className="w-full p-3 border border-borderColor rounded-md focus:outline-none focus:ring-2 focus:ring-primary mb-3 text-textPrimary h-32 resize-y"
+              placeholder="e.g., 'I've been feeling tired, headaches often, stomach hurts sometimes, and I'm worried about my blood pressure.'"
+              value={prepareInput}
+              onChange={(e) => setPrepareInput(e.target.value)}
+            ></textarea>
+            <div className="flex space-x-2 mb-4">
+              <button
+                onClick={handlePrepareAppointment}
+                className="bg-primary hover:bg-primary-hover text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
+                disabled={prepareLoading}
+              >
+                {prepareLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Prepare
+              </button>
+              <button
+                onClick={() => proofreadText({
+                  textToProofread: prepareInput,
+                  setLoading: setPrepareProofreadingLoading,
+                  setError: setPrepareProofreadingError,
+                  setResult: setPrepareProofreadingResult,
+                })}
+                className="bg-secondary hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-secondary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
+                disabled={prepareProofreadingLoading}
+              >
+                {prepareProofreadingLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Proofread Input
+              </button>
+            </div>
+            {prepareError && <ErrorMessage message={prepareError} />}
+            {prepareProofreadingError && <ErrorMessage message={`Proofreading Error: ${prepareProofreadingError}`} />}
+
+            {prepareProofreadingResult && (
               <ResultSection
                 title="Proofread Input"
-                content={<p>No corrections needed.</p>}
+                content={renderMarkdown(prepareProofreadingResult)}
                 variant="info"
               />
             )}
-          </section>
-        )}
-
-        {/* Prepare for Appointment Tab */}
-        {activeTab === 'prepare' && (
-          <section>
-            <h2 className="text-2xl font-bold text-primary mb-5">Prepare for Appointment</h2>
-            <Disclaimer>
-              This tool provides general information and should not replace professional medical advice. Always consult with a qualified healthcare provider for diagnosis and treatment.
-            </Disclaimer>
-
-            <div className="mt-6 mb-4">
-              <label htmlFor="prepare-input" className="block text-lg font-medium text-textPrimary mb-2">
-                Describe your symptoms and concerns:
-              </label>
-              <textarea
-                id="prepare-input"
-                className="w-full p-3 border border-borderColor rounded-lg focus:ring focus:ring-primary focus:border-primary transition-all text-textPrimary"
-                rows={6}
-                value={prepareInput}
-                onChange={(e) => setPrepareInput(e.target.value)}
-                placeholder="e.g., 'I've had a persistent cough for two weeks, accompanied by a low-grade fever and fatigue. I'm worried about bronchitis or pneumonia.'"
-              ></textarea>
-              <button
-                className="bg-primary text-white py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed mt-3 mr-2"
-                onClick={handlePrepareAppointment}
-                disabled={prepareLoading || !apiConfigured}
-              >
-                {prepareLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-white" className="inline-block mr-2" />
-                ) : (
-                  'Generate Guide'
-                )}
-              </button>
-              <button
-    className="bg-gray-200 text-textSecondary py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed mt-3"
-    onClick={handleProofreadPrepare}
-    disabled={prepareProofreadingLoading || !prepareInput.trim()}
->
-    {prepareProofreadingLoading ? (
-        <Spinner size="w-5 h-5" color="border-t-gray-700" className="inline-block mr-2" />
-    ) : (
-        // THIS IS THE LINE YOU ARE CHANGING
-        '✅ Chrome AI Proofread'
-    )}
-</button>
-
-            </div>
-
-            {prepareError && <ErrorMessage message={prepareError} />}
             {prepareOutput && (
               <ResultSection
-                title="Appointment Preparation Guide"
+                title="Appointment Preparation"
                 content={renderMarkdown(prepareOutput)}
               />
             )}
             {prepareGroundingUrls && prepareGroundingUrls.length > 0 && (
               <ResultSection
-                title="Relevant Information from Google Search"
+                title="References"
                 variant="info"
                 content={
                   <ul className="list-disc pl-5">
-                    {prepareGroundingUrls.map((link, index) => (
+                    {prepareGroundingUrls.map((url, index) => (
                       <li key={index} className="mb-1">
-                        <a href={link.uri} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                          {link.title || link.uri}
+                        <a href={url.uri} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                          {url.title || url.uri}
                         </a>
                       </li>
                     ))}
@@ -1157,203 +924,138 @@ const handleProofread = useCallback(async ({
                 }
               />
             )}
-            {prepareProofreadingError && <ErrorMessage message={prepareProofreadingError} />}
-            {prepareProofreadingResult && prepareProofreadingResult !== prepareInput && (
-              <ResultSection
-                title="Proofread Input"
-                content={renderMarkdown(prepareProofreadingResult)}
-                variant="info"
-              />
-            )}
-            {prepareProofreadingResult && prepareProofreadingResult === prepareInput && !prepareProofreadingLoading && (
-              <ResultSection
-                title="Proofread Input"
-                content={<p>No corrections needed.</p>}
-                variant="info"
-              />
-            )}
-          </section>
+          </div>
         )}
 
-        {/* Summarize Notes Tab */}
         {activeTab === 'summarize' && (
-          <section>
-            <h2 className="text-2xl font-bold text-primary mb-5">Summarize Appointment Notes / Prescriptions</h2>
-            <Disclaimer>
-              This tool provides general information and should not replace professional medical advice. Always consult with a qualified healthcare provider for diagnosis and treatment.
-            </Disclaimer>
-
-            <div className="mt-6 mb-4">
-              <label htmlFor="summarize-input" className="block text-lg font-medium text-textPrimary mb-2">
-                Paste your notes or prescription text:
-              </label>
-              <textarea
-                id="summarize-input"
-                className="w-full p-3 border border-borderColor rounded-lg focus:ring focus:ring-primary focus:border-primary transition-all text-textPrimary"
-                rows={6}
-                value={summarizeInput}
-                onChange={(e) => setSummarizeInput(e.target.value)}
-                placeholder="e.g., 'Patient seen for follow-up on hypertension. BP 140/90. Started on Lisinopril 10mg QD. Follow up in 4 weeks. Avoid high sodium diet.'"
-              ></textarea>
-
-              <label htmlFor="summarize-image-input" className="block text-lg font-medium text-textPrimary mt-4 mb-2">
-                Or upload an image of your notes/prescription (optional):
-              </label>
+          <div>
+            <h2 className="text-2xl font-bold text-primary mb-4">Summarize Medical Notes</h2>
+            <p className="text-textSecondary mb-4">
+              Upload an image of your notes or type them in, and I'll provide a concise summary,
+              including any mentioned medications.
+            </p>
+            <div className="flex items-center space-x-4 mb-4">
               <input
-                id="summarize-image-input"
                 type="file"
                 accept="image/*"
                 onChange={handleSummarizeImageChange}
-                className="block w-full text-sm text-textPrimary
-                           file:mr-4 file:py-2 file:px-4
-                           file:rounded-full file:border-0
-                           file:text-sm file:font-semibold
-                           file:bg-violet-50 file:text-primary
-                           hover:file:bg-violet-100 mb-3"
+                className="block w-full text-sm text-textPrimary file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-primary hover:file:bg-violet-100"
               />
               {summarizeImagePreviewUrl && (
-                <div className="mt-2 relative w-48 h-48 border border-borderColor rounded-lg overflow-hidden">
-                  <img src={summarizeImagePreviewUrl} alt="Image preview" className="object-cover w-full h-full" />
-                  <button
-                    onClick={handleClearSummarizeImage}
-                    className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 text-xs"
-                    aria-label="Remove image"
-                  >
-                    ✕
-                  </button>
-                </div>
+                <img src={summarizeImagePreviewUrl} alt="Notes Preview" className="h-24 w-24 object-cover rounded-md shadow-md" />
               )}
-
+            </div>
+            <textarea
+              className="w-full p-3 border border-borderColor rounded-md focus:outline-none focus:ring-2 focus:ring-primary mb-3 text-textPrimary h-32 resize-y"
+              placeholder="e.g., 'Patient seen for follow-up on hypertension. BP 140/90. Current medications: Lisinopril 10mg daily. Discussed diet and exercise.'"
+              value={summarizeInput}
+              onChange={(e) => setSummarizeInput(e.target.value)}
+            ></textarea>
+            <div className="flex space-x-2 mb-4">
               <button
-                className="bg-primary text-white py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed mt-3 mr-2"
                 onClick={handleSummarizeNotes}
-                disabled={summarizeLoading || (!summarizeInput.trim() && !summarizeImageFile) || !apiConfigured}
+                className="bg-primary hover:bg-primary-hover text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
+                disabled={summarizeLoading || (!summarizeInput.trim() && !summarizeImageFile)}
               >
-                {summarizeLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-white" className="inline-block mr-2" />
-                ) : (
-                  'Summarize Notes'
-                )}
+                {summarizeLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Summarize
               </button>
               <button
-                className="bg-gray-200 text-textSecondary py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed mt-3"
-                onClick={handleProofreadSummarize}
+                onClick={() => proofreadText({
+                  textToProofread: summarizeInput,
+                  setLoading: setSummarizeProofreadingLoading,
+                  setError: setSummarizeProofreadingError,
+                  setResult: setSummarizeProofreadingResult,
+                })}
+                className="bg-secondary hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-secondary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
                 disabled={summarizeProofreadingLoading || !summarizeInput.trim()}
               >
-                {summarizeProofreadingLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-gray-700" className="inline-block mr-2" />
-                ) : (
-                  'Proofread Input'
-                )}
+                {summarizeProofreadingLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Proofread Input
               </button>
             </div>
-
             {summarizeError && <ErrorMessage message={summarizeError} />}
-            {summarizeOutput && (
-              <ResultSection
-                title="Notes Summary & Action Items"
-                content={renderMarkdown(summarizeOutput)}
-              />
-            )}
-            {extractedMedications && (
-              <ResultSection
-                title="Medication Details"
-                content={renderMarkdown(extractedMedications)}
-                variant="info"
-              />
-            )}
-            {summarizeProofreadingError && <ErrorMessage message={summarizeProofreadingError} />}
-            {summarizeProofreadingResult && summarizeProofreadingResult !== summarizeInput && (
+            {summarizeProofreadingError && <ErrorMessage message={`Proofreading Error: ${summarizeProofreadingError}`} />}
+
+            {summarizeProofreadingResult && (
               <ResultSection
                 title="Proofread Input"
                 content={renderMarkdown(summarizeProofreadingResult)}
                 variant="info"
               />
             )}
-            {summarizeProofreadingResult && summarizeProofreadingResult === summarizeInput && !summarizeProofreadingLoading && (
+            {summarizeOutput && (
               <ResultSection
-                title="Proofread Input"
-                content={<p>No corrections needed.</p>}
+                title="Summary"
+                content={renderMarkdown(summarizeOutput)}
+              />
+            )}
+            {extractedMedications && (
+              <ResultSection
+                title="Extracted Medications"
+                content={renderMarkdown(extractedMedications)}
                 variant="info"
               />
             )}
-          </section>
+          </div>
         )}
 
-        {/* Explain Lab Results Tab */}
         {activeTab === 'labs' && (
-          <section>
-            <h2 className="text-2xl font-bold text-primary mb-5">Explain Lab Results</h2>
-            <Disclaimer>
-              This tool provides general information and should not replace professional medical advice. Always consult with a qualified healthcare provider for diagnosis and treatment. Lab results interpretation is complex and dependent on individual factors.
-            </Disclaimer>
-
-            <div className="mt-6 mb-4">
-              <label htmlFor="labs-input" className="block text-lg font-medium text-textPrimary mb-2">
-                Paste your lab results text:
-              </label>
-              <textarea
-                id="labs-input"
-                className="w-full p-3 border border-borderColor rounded-lg focus:ring focus:ring-primary focus:border-primary transition-all text-textPrimary"
-                rows={6}
-                value={labsInput}
-                onChange={(e) => setLabsInput(e.target.value)}
-                placeholder="e.g., 'Glucose: 120 mg/dL (Normal: 70-99 mg/dL), Cholesterol Total: 220 mg/dL (Normal: <200 mg/dL), HDL: 40 mg/dL (Normal: >60 mg/dL)'"
-              ></textarea>
-
-              <label htmlFor="labs-image-input" className="block text-lg font-medium text-textPrimary mt-4 mb-2">
-                Or upload an image of your lab results (optional):
-              </label>
+          <div>
+            <h2 className="text-2xl font-bold text-primary mb-4">Explain Lab Results</h2>
+            <p className="text-textSecondary mb-4">
+              Upload an image or type in your lab results, and I'll explain what they mean in simple terms.
+            </p>
+            <div className="flex items-center space-x-4 mb-4">
               <input
-                id="labs-image-input"
                 type="file"
                 accept="image/*"
                 onChange={handleLabsImageChange}
-                className="block w-full text-sm text-textPrimary
-                           file:mr-4 file:py-2 file:px-4
-                           file:rounded-full file:border-0
-                           file:text-sm file:font-semibold
-                           file:bg-violet-50 file:text-primary
-                           hover:file:bg-violet-100 mb-3"
+                className="block w-full text-sm text-textPrimary file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-primary hover:file:bg-violet-100"
               />
               {labsImagePreviewUrl && (
-                <div className="mt-2 relative w-48 h-48 border border-borderColor rounded-lg overflow-hidden">
-                  <img src={labsImagePreviewUrl} alt="Image preview" className="object-cover w-full h-full" />
-                  <button
-                    onClick={handleClearLabsImage}
-                    className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 text-xs"
-                    aria-label="Remove image"
-                  >
-                    ✕
-                  </button>
-                </div>
+                <img src={labsImagePreviewUrl} alt="Labs Preview" className="h-24 w-24 object-cover rounded-md shadow-md" />
               )}
-
+            </div>
+            <textarea
+              className="w-full p-3 border border-borderColor rounded-md focus:outline-none focus:ring-2 focus:ring-primary mb-3 text-textPrimary h-32 resize-y"
+              placeholder="e.g., 'Glucose: 120 mg/dL (High), Hemoglobin A1c: 6.8% (High), Cholesterol Total: 220 mg/dL (High)'"
+              value={labsInput}
+              onChange={(e) => setLabsInput(e.target.value)}
+            ></textarea>
+            <div className="flex space-x-2 mb-4">
               <button
-                className="bg-primary text-white py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed mt-3 mr-2"
-                onClick={handleExplainLabs}
-                disabled={labsLoading || (!labsInput.trim() && !labsImageFile) || !apiConfigured}
+                onClick={handleLabsExplanation}
+                className="bg-primary hover:bg-primary-hover text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
+                disabled={labsLoading || (!labsInput.trim() && !labsImageFile)}
               >
-                {labsLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-white" className="inline-block mr-2" />
-                ) : (
-                  'Explain Results'
-                )}
+                {labsLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Explain
               </button>
               <button
-                className="bg-gray-200 text-textSecondary py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed mt-3"
-                onClick={handleProofreadLabs}
+                onClick={() => proofreadText({
+                  textToProofread: labsInput,
+                  setLoading: setLabsProofreadingLoading,
+                  setError: setLabsProofreadingError,
+                  setResult: setLabsProofreadingResult,
+                })}
+                className="bg-secondary hover:bg-emerald-600 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-secondary focus:ring-opacity-75 transition duration-150 ease-in-out flex items-center justify-center"
                 disabled={labsProofreadingLoading || !labsInput.trim()}
               >
-                {labsProofreadingLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-gray-700" className="inline-block mr-2" />
-                ) : (
-                  'Proofread Input'
-                )}
+                {labsProofreadingLoading && <Spinner size="w-4 h-4" color="border-t-white" className="mr-2" />}
+                Proofread Input
               </button>
             </div>
-
             {labsError && <ErrorMessage message={labsError} />}
+            {labsProofreadingError && <ErrorMessage message={`Proofreading Error: ${labsProofreadingError}`} />}
+
+            {labsProofreadingResult && (
+              <ResultSection
+                title="Proofread Input"
+                content={renderMarkdown(labsProofreadingResult)}
+                variant="info"
+              />
+            )}
             {labsOutput && (
               <ResultSection
                 title="Lab Results Explanation"
@@ -1362,14 +1064,14 @@ const handleProofread = useCallback(async ({
             )}
             {labsGroundingUrls && labsGroundingUrls.length > 0 && (
               <ResultSection
-                title="Relevant Information from Google Search"
+                title="References"
                 variant="info"
                 content={
                   <ul className="list-disc pl-5">
-                    {labsGroundingUrls.map((link, index) => (
+                    {labsGroundingUrls.map((url, index) => (
                       <li key={index} className="mb-1">
-                        <a href={link.uri} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                          {link.title || link.uri}
+                        <a href={url.uri} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                          {url.title || url.uri}
                         </a>
                       </li>
                     ))}
@@ -1377,90 +1079,73 @@ const handleProofread = useCallback(async ({
                 }
               />
             )}
-            {labsProofreadingError && <ErrorMessage message={labsProofreadingError} />}
-            {labsProofreadingResult && labsProofreadingResult !== labsInput && (
-              <ResultSection
-                title="Proofread Input"
-                content={renderMarkdown(labsProofreadingResult)}
-                variant="info"
-              />
-            )}
-            {labsProofreadingResult && labsProofreadingResult === labsInput && !labsProofreadingLoading && (
-              <ResultSection
-                title="Proofread Input"
-                content={<p>No corrections needed.</p>}
-                variant="info"
-              />
-            )}
-          </section>
+          </div>
         )}
 
-        {/* Record Session Tab */}
         {activeTab === 'record' && (
-          <section>
-            <h2 className="text-2xl font-bold text-primary mb-5">Record Session</h2>
-            <Disclaimer>
-              This tool provides real-time AI assistance during conversations. It captures audio and processes it with AI. Ensure you have explicit consent from all parties before recording any conversation. This tool should not replace professional medical advice.
-            </Disclaimer>
+          <div className="relative">
+            <h2 className="text-2xl font-bold text-primary mb-4">Record Session</h2>
+            <p className="text-textSecondary mb-4">
+              Have a real-time conversation with your AI medical advocate. Speak your concerns or questions, and the AI will respond.
+            </p>
 
-            <div className="mt-6 mb-4 flex justify-center">
+            <div className="flex justify-center mb-6">
               {!isRecording ? (
                 <button
-                  className="bg-green-600 text-white py-3 px-6 rounded-lg text-lg font-semibold transition-all hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                   onClick={handleStartRecording}
-                  disabled={liveLoading || !apiConfigured}
+                  className="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-full text-lg shadow-md focus:outline-none focus:ring-4 focus:ring-green-300 transition duration-300 ease-in-out transform hover:scale-105 flex items-center"
+                  disabled={liveLoading}
                 >
-                  {liveLoading ? (
-                    <Spinner size="w-6 h-6" color="border-t-white" className="inline-block mr-2" />
-                  ) : (
-                    <>
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                      </svg>
-                      Start Recording
-                    </>
-                  )}
+                  {liveLoading && <Spinner size="w-5 h-5" color="border-t-white" className="mr-3" />}
+                  <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a7 7 0 01-7-7m7 7a7 7 0 007-7m0 0H8m4-4h4m-4-4H8"></path></svg>
+                  Start Recording
                 </button>
               ) : (
                 <button
-                  className="bg-red-600 text-white py-3 px-6 rounded-lg text-lg font-semibold transition-all hover:bg-red-700 flex items-center gap-2"
                   onClick={handleStopRecording}
-                  disabled={liveLoading} // Disable if still in a loading/closing state
+                  className="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-full text-lg shadow-md focus:outline-none focus:ring-4 focus:ring-red-300 transition duration-300 ease-in-out transform hover:scale-105 flex items-center"
+                  disabled={!isRecording}
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-                  </svg>
+                  <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"></path></svg>
                   Stop Recording
                 </button>
               )}
             </div>
 
-            {liveError && <ErrorMessage message={liveError} />}
-            {liveLoading && !isRecording && <ResultSection title="Starting Session..." content="Please wait while the AI prepares. You may be prompted for microphone access." />}
-
-            <div className="mt-8">
-              <h3 className="text-xl font-semibold text-primary mb-4">Conversation Transcript:</h3>
-              <div className="bg-bgSecondary p-4 rounded-lg h-96 overflow-y-auto border border-borderColor">
-                {transcriptionHistory.length === 0 && currentLiveInputTranscription === '' && currentLiveOutputTranscription === '' && (
-                  <p className="text-textSecondary italic">Start recording to see the transcript.</p>
-                )}
-                {transcriptionHistory.map((entry, index) => (
-                  <p key={index} className={`mb-2 ${entry.speaker === 'User' ? 'text-gray-800' : 'text-primary'}`}>
-                    <strong>{entry.speaker}:</strong> {entry.text}
-                  </p>
-                ))}
-                {currentLiveInputTranscription && (
-                  <p className="mb-2 text-gray-700"><strong>User (speaking):</strong> {currentLiveInputTranscription}</p>
-                )}
-                {currentLiveOutputTranscription && (
-                  <p className="mb-2 text-primary"><strong>AI (speaking):</strong> {currentLiveOutputTranscription}</p>
-                )}
+            {liveLoading && isRecording && (
+              <div className="flex items-center justify-center mb-4 text-primary font-medium">
+                <Spinner size="w-6 h-6" className="mr-3" />
+                Listening...
               </div>
+            )}
+
+            {liveError && <ErrorMessage message={liveError} />}
+
+            <div className="mt-6 border border-borderColor rounded-lg p-4 bg-white shadow-inner max-h-96 overflow-y-auto">
+              <h3 className="text-xl font-semibold mb-3 text-primary">Conversation Log</h3>
+              {transcriptionHistory.length === 0 && !currentLiveInputTranscription && !currentLiveOutputTranscription ? (
+                <p className="text-textSecondary text-center italic">Start recording to begin your conversation.</p>
+              ) : (
+                transcriptionHistory.map((entry, index) => (
+                  <div key={index} className={`mb-2 p-2 rounded-lg ${entry.speaker === 'User' ? 'bg-blue-50 text-blue-800 self-end text-right ml-auto' : 'bg-green-50 text-green-800 self-start mr-auto'}`}>
+                    <strong className="font-semibold">{entry.speaker}:</strong> {entry.text}
+                  </div>
+                ))
+              )}
+              {currentLiveInputTranscription && (
+                <div className="mb-2 p-2 rounded-lg bg-blue-50 text-blue-800 self-end text-right ml-auto animate-pulse">
+                  <strong className="font-semibold">User (Live):</strong> {currentLiveInputTranscription}
+                </div>
+              )}
+              {currentLiveOutputTranscription && (
+                <div className="mb-2 p-2 rounded-lg bg-green-50 text-green-800 self-start mr-auto animate-pulse">
+                  <strong className="font-semibold">Model (Live):</strong> {currentLiveOutputTranscription}
+                </div>
+              )}
             </div>
-          </section>
+          </div>
         )}
-      </main>
+      </div>
     </div>
   );
 };
