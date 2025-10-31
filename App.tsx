@@ -1119,16 +1119,18 @@ const handleProofread = useCallback(async ({
                 )}
               </button>
               <button
-                className="bg-gray-200 text-textSecondary py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed mt-3"
-                onClick={handleProofreadPrepare}
-                disabled={prepareProofreadingLoading || !prepareInput.trim()}
-              >
-                {prepareProofreadingLoading ? (
-                  <Spinner size="w-5 h-5" color="border-t-gray-700" className="inline-block mr-2" />
-                ) : (
-                  'Proofread Input'
-                )}
-              </button>
+    className="bg-gray-200 text-textSecondary py-2 px-5 rounded-lg text-base font-semibold transition-all hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed mt-3"
+    onClick={handleProofreadPrepare}
+    disabled={prepareProofreadingLoading || !prepareInput.trim()}
+>
+    {prepareProofreadingLoading ? (
+        <Spinner size="w-5 h-5" color="border-t-gray-700" className="inline-block mr-2" />
+    ) : (
+        // THIS IS THE LINE YOU ARE CHANGING
+        '✅ Chrome AI Proofread'
+    )}
+</button>
+
             </div>
 
             {prepareError && <ErrorMessage message={prepareError} />}
