@@ -632,26 +632,57 @@ Format clearly with "Overall Summary:" followed by headers for each test. Use ma
     }
   }, [labsInput, labsImageFile, executeGeminiCall, setLabsLoading, setLabsOutput, setLabsError, setLabsGroundingUrls, setLabsProofreadingResult]); // Added all state variables and setters to dependencies
 
-  // Generic Proofread Handler
-  const handleProofread = useCallback(async (
-    currentInput: string,
-    setProofreadingLoading: React.Dispatch<React.SetStateAction<boolean>>,
-    setProofreadingError: React.Dispatch<React.SetStateAction<string | null>>,
-    setProofreadingResult: React.Dispatch<React.SetStateAction<string | null>>
-  ) => {
-    if (!currentInput.trim()) {
-      alert('Please enter text to proofread.');
-      return;
-    }
-    setProofreadingLoading(true);
-    setProofreadingResult(null);
-    setProofreadingError(null);
+// Chrome AI Proofreader API Integration
+const handleProofread = useCallback(async ({
+  currentInput,
+  setProofreadingLoading,
+  setProofreadingError,
+  setProofreadingResult,
+}: {
+  currentInput: string;
+  setProofreadingLoading: React.Dispatch<React.SetStateAction<boolean>>;
+  setProofreadingError: React.Dispatch<React.SetStateAction<string | null>>;
+  setProofreadingResult: React.Dispatch<React.SetStateAction<string | null>>;
+}) => {
+  if (!currentInput.trim()) {
+    alert('Please enter text to proofread.');
+    return;
+  }
 
+  setProofreadingLoading(true);
+  setProofreadingResult(null);
+  setProofreadingError(null);
+
+  // --- START of Chrome AI Proofreader API Integration ---
+  if ('ai' in window && 'proofread' in window.ai) {
+    try {
+      // 1. Call the Chrome AI Proofreader API
+      const result = await window.ai.proofread({ text: currentInput });
+
+      // The result object contains the corrected text
+      const correctedText = result.text;
+
+      // 2. Set the result state with the corrected text
+      setProofreadingResult(correctedText);
+
+      // Optional: Alert for successful use of the new feature
+      alert('Proofreading complete! The text has been corrected by the Chrome AI Proofreader API.');
+
+    } catch (error) {
+      // Handle errors (e.g., user denied permission, API not available)
+      console.error('Chrome AI Proofread Error:', error);
+      setProofreadingError('Proofreading failed. Please ensure Chrome AI features are enabled.');
+    } finally {
+      setProofreadingLoading(false);
+    }
+  } else {
+    // --- Fallback to existing Gemini Proofread logic ---
     try {
       const result = await executeGeminiCall(
         () => callGeminiProofread(currentInput),
         setProofreadingError
       );
+
       if (result) { // Only set result if not undefined
         setProofreadingResult(result);
       }
@@ -660,7 +691,11 @@ Format clearly with "Overall Summary:" followed by headers for each test. Use ma
     } finally {
       setProofreadingLoading(false);
     }
-  }, [executeGeminiCall]); // Only executeGeminiCall is a dependency as others are function parameters.
+    // --- END of Fallback ---
+  }
+  // --- END of Chrome AI Proofreader API Integration ---
+
+}, [executeGeminiCall]);
 
   const handleProofreadTranslate = useCallback(() => {
     handleProofread(
